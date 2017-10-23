@@ -1,0 +1,3 @@
+<launch >
+    <node pkg="helpmecarry" type="bag_grabber.py" name="helpmecarry_bag_grabber" output="screen" required="true" />
+</launch>
