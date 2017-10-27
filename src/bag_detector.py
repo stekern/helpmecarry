@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 #
-# Copyright © 2017 rsa <dev@ekern.me>
+# Copyright © 2017 Erlend Ekern <dev@ekern.me>
 #
 # Distributed under terms of the MIT license.
 
 """
-
+A ROS node that looks for square-shaped, bright colored bags and
+publishes the approximate location of the bag handle on a topic
 """
 
 import rospy
@@ -21,10 +22,13 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped
 
 
-# The percentage of cropping
+# The bag's bounding box is cropped on every side according to this percentage
+# and the distance to the bag depth is averaged from this cropped area
 BOUNDING_BOX_OFFSET = 0.25
+# The lower and upper boundary of the width/height-ratio of the bag
 RECTANGLE_RATIO_BOUNDARIES = (0.70, 0.90)
-BAG_HEIGHT_HANDLE_RATIO = 3
+# The height of the handle in terms of the height of the bag
+BAG_HEIGHT_HANDLE_RATIO = 1/float(3)
 
 # Camera topics
 RGB_TOPIC = '/hsrb/head_rgbd_sensor/rgb/image_rect_color'
@@ -38,15 +42,20 @@ COLOR_BOUNDARIES = {
         'YELLOW': ([0, 120, 120], [150, 255, 255]),
         'GREEN': ([10, 120, 80], [70, 240, 150]),
         }
+# Set to True if you would like to do color thresholding on every color in
+# the COLOR_BOUNDARIES dictionary
+USE_MULTIPLE_MASKS = False
+# The color to threshold on if USE_MULTIPLE_MASKS is False
+DEFAULT_COLOR = 'YELLOW'
 
 
 class BagDetector(object):
 
     def __init__(self):
-
         rospy.init_node('bag_detector', anonymous=True)
         self.bridge = CvBridge()
 
+        # RGB and depth image must arrive within 1 second of each other
         rgb_sub = message_filters.Subscriber(RGB_TOPIC, Image)
         depth_sub = message_filters.Subscriber(DEPTH_TOPIC, Image)
         self.ts = message_filters.ApproximateTimeSynchronizer([rgb_sub, depth_sub], 10, 1)
@@ -109,17 +118,18 @@ class BagDetector(object):
 
         return ymin, ymax, xmin, xmax
 
-    def apply_color_mask(self, image, boundaries=COLOR_BOUNDARIES, combine_masks=False):
-        if combine_masks:
+    def apply_color_mask(self, image):
+        if USE_MULTIPLE_MASKS:
             mask = self.get_combined_color_mask(image)
         else:
             # Only use a yellow color mask by default
-            lower, upper = boundaries['YELLOW']
+            lower, upper = COLOR_BOUNDARIES[DEFAULT_COLOR]
             lower = np.array(lower, dtype = "uint8")
             upper = np.array(upper, dtype = "uint8")
- 
-        # Apply color mask
-	mask = cv2.inRange(image, lower, upper)
+
+            # Apply color mask
+            mask = cv2.inRange(image, lower, upper)
+
 	color_filtered = cv2.bitwise_and(image, image, mask = mask)
 
         # Apply median blur to reduce noise
@@ -155,7 +165,7 @@ class BagDetector(object):
 
         self.bag_pub.publish(bag)
 
-    def get_image_with_objects(self, contours, rgb_image, depth_image, ratio_threshold=RECTANGLE_RATIO_BOUNDARIES):
+    def get_image_with_objects(self, contours, rgb_image, depth_image):
         draw_image = rgb_image.copy()
         for c in contours:
             # Compute the center of the contour
@@ -182,7 +192,7 @@ class BagDetector(object):
             ratio = float(width)/height
 
             # Skip contours where width/height-ratio is off
-            if not (ratio_threshold[0] < ratio < ratio_threshold[1]): continue
+            if not (RECTANGLE_RATIO_BOUNDARIES[0] < ratio < RECTANGLE_RATIO_BOUNDARIES[1]): continue
 
             bounding_box = cv2.cv.BoxPoints(rect)
             bounding_box = np.int0(bounding_box)
@@ -213,7 +223,7 @@ class BagDetector(object):
             min_avg_y = sum(x[1] for x in bounding_box_corners[:2])/2
             # Use the ratio between the bag height and the handle position
             # to calculate y-value of bag handle
-            bag_handle_y = int(min_avg_y - height/BAG_HEIGHT_HANDLE_RATIO)
+            bag_handle_y = int(min_avg_y - height * BAG_HEIGHT_HANDLE_RATIO)
             bag_handle = (cX, bag_handle_y)
 
             point3d = self.convert_2d_point_to_3d_point(bag_handle, depth)
@@ -230,9 +240,9 @@ class BagDetector(object):
         point = ray * depth
         return point
 
-    def get_combined_color_mask(self, image, boundaries=COLOR_BOUNDARIES):
+    def get_combined_color_mask(self, image):
         masks = []
-        for key, value in boundaries.iteritems():
+        for key, value in COLOR_BOUNDARIES.iteritems():
             lower = np.array(value[0], dtype='uint8')
             upper = np.array(value[1], dtype='uint8')
             mask = cv2.inRange(image, lower, upper)

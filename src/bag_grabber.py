@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 #
-# Copyright © 2017 rsa <dev@ekern.me>
+# Copyright © 2017 Erlend Ekern <dev@ekern.me>
 #
 # Distributed under terms of the MIT license.
 
 """
-
+A ROS node that subscribes to the position of bag handles and
+tries to move towards the bag and pick it up
 """
 
 import tf
@@ -39,18 +40,14 @@ LINEAR_VELOCITY = 0.04
 # Constant for activating different phases of the task
 DEPTH_THRESHOLDS = (0.8, 1.2)
 
-# How many samples to do of bag position
-# before initiating arm movement
+# How many samples to do of bag position before initiating arm movement
 NUM_SAMPLES = 5
 
-# This constant is multiplied by the current depth 
-# to control the number of seconds the robot can 
-# move towards the bag at a time
+# This constant is multiplied by the current depth to control the number of
+# seconds the robot can move towards the bag at a time
 TIMEOUT_MULTIPLIER = 2.0
 
-
-
-# 
+# The highest the ARM_LIFT_JOINT can be raised
 MAX_ARM_LIFT = 0.69
 
 # Neutral position
@@ -85,7 +82,7 @@ class BagGrabber(object):
         self.gripper = self.robot.get('gripper', self.robot.Items.END_EFFECTOR)
         self.omni_base = self.robot.get('omni_base')
 
-        self.start_position = {
+        self.neutral_position = {
             ARM_LIFT_JOINT: 0.0,
             ARM_FLEX_JOINT: 0.0,
             ARM_ROLL_JOINT: 0.0,
@@ -95,13 +92,13 @@ class BagGrabber(object):
             HEAD_TILT_JOINT: 0.0,
         }
 
-        self.neutral_position = {
-            HEAD_PAN_JOINT: 0.0,
-            HEAD_TILT_JOINT: 0.0,
-        }
+        #self.neutral_position = {
+        #    HEAD_PAN_JOINT: 0.0,
+        #    HEAD_TILT_JOINT: 0.0,
+        #}
 
-        rospy.loginfo('Moving robot to start position')
-        self.whole_body.move_to_joint_positions(self.start_position)
+        rospy.loginfo('Moving robot to neutral position')
+        self.whole_body.move_to_joint_positions(self.neutral_position)
         self.gripper.command(GRIPPER_OPENED)
 
         self.samples = []
@@ -135,9 +132,9 @@ class BagGrabber(object):
         twist = Twist()
         # Velocity is multiplied by depth to move slower when close to bag
         if x > center + CENTERING_THRESHOLD:
-            twist.linear.y = -LINEAR_VELOCITY* depth
+            twist.linear.y = -LINEAR_VELOCITY * depth
         elif x < center - CENTERING_THRESHOLD:
-            twist.linear.y = LINEAR_VELOCITY* depth
+            twist.linear.y = LINEAR_VELOCITY * depth
         self.velocity_pub.publish(twist)
 
     def transform_point(self, source, target, point):
@@ -151,6 +148,8 @@ class BagGrabber(object):
                 continue
 
     def get_updated_arm_lift(self, change):
+        # whole_body.joint_state.position is an array containing the current
+        # state of all of the joints. Index 1 belongs to the ARM_LIFT_JOINT
         curr_arm_lift = self.whole_body.joint_state.position[1]
         new_arm_lift = curr_arm_lift + change
         if new_arm_lift > MAX_ARM_LIFT:
@@ -191,8 +190,11 @@ class BagGrabber(object):
                     rospy.logerr('Movement towards bag timed out')
                     pass
 
-                # Reset head position to get more accurate readings
+                # A delay is added here to avoid interference between 
+                # the previous and next control command
                 rospy.sleep(SLEEP_DELAY)
+
+                # Reset position to get more accurate readings
                 self.whole_body.move_to_joint_positions(self.neutral_position)
 
             elif depth < DEPTH_THRESHOLDS[0]:
@@ -203,43 +205,46 @@ class BagGrabber(object):
                 #rospy.sleep(SLEEP_DELAY)
 
             elif DEPTH_THRESHOLDS[0] < depth < DEPTH_THRESHOLDS[1]:
-                if not self.in_position:
-                    rospy.loginfo('Setting robot to neutral position')
-                    rospy.sleep(SLEEP_DELAY)
-                    self.whole_body.move_to_joint_positions(self.start_position)
-                    self.in_position = True
+                rospy.loginfo('Setting robot to neutral position')
 
-                if self.in_position:
-                    trans = self.transform_point(cam_frame, HAND_FRAME, bag_handle)
-                    # Use 
-                    self.samples.append((trans.point.x, trans.point.y, trans.point.z))
-                    if len(self.samples) >= NUM_SAMPLES:
-                        rospy.loginfo('Moving arm to the bag handle')
-                        try:
-                            x = np.mean([s[0] for s in self.samples])
-                            y = np.mean([s[1] for s in self.samples])
-                            z = np.mean([s[2] for s in self.samples])
+                # A delay is added here to avoid interference between 
+                # the previous and next control command
+                rospy.sleep(SLEEP_DELAY)
 
-                            self.whole_body.move_end_effector_pose(hsrb.geometry.pose(x=x, y=y, z=z), HAND_FRAME)
+                self.whole_body.move_to_joint_positions(self.neutral_position)
 
-                            rospy.loginfo('Picking up the bag handle')
-                            twist = Twist()
-                            twist.linear.x = GRAB_FORWARD_VELOCITY
-                            self.velocity_pub.publish(twist)
+                trans = self.transform_point(cam_frame, HAND_FRAME, bag_handle)
+                # Perform multiple readings to improve accuracy
+                self.samples.append((trans.point.x, trans.point.y, trans.point.z))
+                if len(self.samples) >= NUM_SAMPLES:
+                    rospy.loginfo('Moving arm to the bag handle')
+                    try:
+                        x = np.mean([s[0] for s in self.samples])
+                        y = np.mean([s[1] for s in self.samples])
+                        z = np.mean([s[2] for s in self.samples])
 
-                            # A delay is added here to avoid interference between 
-                            # the previous and next control command
-                            rospy.sleep(SLEEP_DELAY)
+                        self.whole_body.move_end_effector_pose(hsrb.geometry.pose(x=x, y=y, z=z), HAND_FRAME)
 
-                            arm_lift = self.get_updated_arm_lift(GRAB_ARM_LIFT_INCREASE)
-                            self.whole_body.move_to_joint_positions({
-                                ARM_LIFT_JOINT: arm_lift,
-                                WRIST_FLEX_JOINT: GRAB_WRIST_FLEX_ANGLE
-                                })
+                        rospy.loginfo('Picking up the bag handle')
+                        twist = Twist()
+                        twist.linear.x = GRAB_FORWARD_VELOCITY
+                        self.velocity_pub.publish(twist)
 
-                            self.finished = True
-                        except hsrb.exceptions.MotionPlanningError:
-                            rospy.logerr('Failed to plan arm movement')
+                        # A delay is added here to avoid interference between 
+                        # the previous and next control command
+                        rospy.sleep(SLEEP_DELAY)
+
+                        arm_lift = self.get_updated_arm_lift(GRAB_ARM_LIFT_INCREASE)
+                        self.whole_body.move_to_joint_positions({
+                            ARM_LIFT_JOINT: arm_lift,
+                            WRIST_FLEX_JOINT: GRAB_WRIST_FLEX_ANGLE
+                            })
+
+                        self.finished = True
+
+                        rospy.loginfo('Bag should be picked up. Shutting down ...')
+                    except hsrb.exceptions.MotionPlanningError:
+                        rospy.logerr('Failed to plan arm movement')
 
 
 if __name__ == '__main__':
